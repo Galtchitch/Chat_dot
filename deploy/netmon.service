@@ -1,0 +1,16 @@
+[Unit]
+Description=netmon — Telegram-бот мониторинга узлов локальной сети
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Замените пользователя и путь на свои
+User=netmon
+WorkingDirectory=/opt/netmon
+ExecStart=/opt/netmon/.venv/bin/python -m netmon
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

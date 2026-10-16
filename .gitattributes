@@ -1,0 +1,10 @@
+# Нормализация переводов строк между Windows и Linux.
+* text=auto
+
+# Windows-скрипты должны иметь CRLF, остальное — LF.
+*.bat text eol=crlf
+*.service text eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf

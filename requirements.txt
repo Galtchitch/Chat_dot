@@ -1,0 +1,4 @@
+python-telegram-bot>=21.6,<23
+PyYAML>=6.0
+# База часовых поясов для Windows (нужна, если задан notify.timezone)
+tzdata>=2024.1; platform_system == "Windows"

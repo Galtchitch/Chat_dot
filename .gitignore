@@ -1,0 +1,11 @@
+.env
+config.yaml
+data/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.zip
