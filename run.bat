@@ -3,6 +3,9 @@ REM Запуск netmon. Сначала пробуем виртуальное о
 REM затем лаунчер py, затем python из PATH.
 cd /d "%~dp0"
 
+REM Если собран набор корпоративных ЦС, доверяем ему (для HTTPS-проверок и сторонних библиотек).
+if exist "%CD%\certs\ca-bundle.pem" set "SSL_CERT_FILE=%CD%\certs\ca-bundle.pem"
+
 if exist ".venv\Scripts\python.exe" (
   ".venv\Scripts\python.exe" -m netmon
   goto :done

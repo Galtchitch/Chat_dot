@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import ssl
 import tempfile
 import time
 import unittest
@@ -300,6 +301,91 @@ class ScanTest(unittest.IsolatedAsyncioTestCase):
         live, total = await live_hosts("127.0.0.1/32", timeout=2.0, workers=2)
         self.assertEqual(total, 1)
         self.assertIn("127.0.0.1", [address for address, _ in live])
+
+
+# ------------------------------------------------- настройки и сертификаты
+
+
+class ConfigTest(unittest.TestCase):
+    def _write(self, text: str) -> str:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "config.yaml")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        return path
+
+    def test_reads_networks_and_ca_bundle(self) -> None:
+        from netmon.config import load_config
+
+        path = self._write(
+            "telegram:\n"
+            "  ca_bundle: certs/ca.pem\n"
+            "notify:\n"
+            "  window: \"07:00-22:30\"\n"
+            "networks:\n"
+            "  - name: Сеть 124\n"
+            "    cidr: 192.168.124.0/24\n"
+        )
+        config = load_config(path)
+        self.assertEqual(config.telegram.ca_bundle, "certs/ca.pem")
+        self.assertEqual(config.notify.window, "07:00-22:30")
+        self.assertEqual(config.networks[0].name, "Сеть 124")
+        self.assertEqual(config.networks[0].cidr, "192.168.124.0/24")
+
+    def test_bad_cidr_raises(self) -> None:
+        from netmon.config import load_config
+
+        path = self._write("networks:\n  - name: N\n    cidr: 300.0.0.0/24\n")
+        with self.assertRaises(ValueError):
+            load_config(path)
+
+
+class CertsTest(unittest.TestCase):
+    def test_der_to_pem(self) -> None:
+        from netmon.certs import der_to_pem
+
+        pem = der_to_pem(b"\x30\x03\x02\x01\x01")
+        self.assertTrue(pem.startswith("-----BEGIN CERTIFICATE-----"))
+        self.assertIn("-----END CERTIFICATE-----", pem)
+
+    @unittest.skipUnless(hasattr(ssl, "enum_certificates"), "нет системного хранилища (не Windows)")
+    def test_build_bundle_is_loadable(self) -> None:
+        from netmon.certs import build_bundle
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path, added = build_bundle(os.path.join(tmp.name, "ca-bundle.pem"))
+        self.assertGreater(added, 0)
+        self.assertIn("BEGIN CERTIFICATE", path.read_text(encoding="ascii"))
+        # OpenSSL должен принять файл целиком.
+        ssl.create_default_context(cafile=str(path))
+
+
+# ------------------------------------------------------------- сборка бота
+
+
+class AppBuildTest(unittest.TestCase):
+    def test_commands_and_handlers(self) -> None:
+        from netmon.bot import COMMANDS, create_app
+
+        for command in COMMANDS:
+            self.assertRegex(command.command, r"^[a-z0-9_]{1,32}$", command.command)
+
+        config = Config()
+        config.telegram.token = "123456:TESTTOKEN"
+        app = create_app(config, make_storage(self))
+        self.assertEqual(len(app.handlers[0]), 14)
+
+    def test_help_mentions_existing_commands(self) -> None:
+        import re
+
+        from netmon.bot import COMMANDS, HELP_TEXT
+
+        known = {command.command for command in COMMANDS}
+        mentioned = set(re.findall(r"(?<!<)/([a-z0-9_]+)", HELP_TEXT))
+        unknown = mentioned - known
+        self.assertEqual(unknown, set(), f"в справке упомянуты неизвестные команды: {unknown}")
 
 
 # ------------------------------------------------------------- группировка

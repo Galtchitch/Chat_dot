@@ -6,6 +6,7 @@ import asyncio
 import html
 import ipaddress
 import logging
+from pathlib import Path
 import time
 
 from telegram import BotCommand, Update
@@ -36,7 +37,7 @@ COMMANDS = [
     BotCommand("down", "Только недоступные узлы"),
     BotCommand("check", "Проверить сейчас: /check [имя|адрес]"),
     BotCommand("scan", "Найти узлы в подсети: /scan [сеть|CIDR]"),
-    BotCommand("scan-add", "Найти и добавить узлы: /scan-add [сеть|CIDR]"),
+    BotCommand("scan_add", "Найти и добавить узлы: /scan_add [сеть|CIDR]"),
     BotCommand("add", "Добавить узел: /add имя адрес [icmp|tcp|http] [порт] [интервал]"),
     BotCommand("remove", "Удалить узел: /remove имя"),
     BotCommand("enable", "Включить проверки: /enable имя"),
@@ -54,7 +55,7 @@ HELP_TEXT = (
     "/down — только недоступные узлы\n"
     "/check [имя|адрес] — проверить сейчас (без аргумента — все узлы)\n"
     "/scan [сеть|CIDR] — найти живые узлы в подсети\n"
-    "/scan-add [сеть|CIDR] — найти и добавить их в мониторинг\n"
+    "/scan_add [сеть|CIDR] — найти и добавить их в мониторинг\n"
     "/add имя адрес [icmp|tcp|http] [порт] [интервал] — добавить узел\n"
     "/remove имя — удалить узел\n"
     "/disable имя, /enable имя — пауза и возобновление проверок\n"
@@ -176,7 +177,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not hosts:
         await update.message.reply_text(
             "Список узлов пуст. Добавьте узел: /add имя адрес,\n"
-            "или найдите узлы в подсети: /scan-add " + (config.networks[0].cidr if config.networks else "192.168.1.0/24")
+            "или найдите узлы в подсети: /scan_add " + (config.networks[0].cidr if config.networks else "192.168.1.0/24")
         )
         return
 
@@ -466,9 +467,35 @@ async def _post_shutdown(app: Application) -> None:
             task.cancel()
 
 
+def _resolve_ca_bundle(setting: str) -> str:
+    """Путь к PEM-набору доверенных ЦС или пустая строка."""
+    if not setting:
+        return ""
+    if setting.lower() == "auto":
+        from .certs import DEFAULT_BUNDLE, build_bundle
+
+        path, added = build_bundle(DEFAULT_BUNDLE)
+        log.info("Собран набор сертификатов: %s (системных корней: %s)", path, added)
+        return str(path)
+    return str(Path(setting).expanduser())
+
+
 def create_app(config: Config, storage: Storage) -> Application:
+    from telegram.request import HTTPXRequest
+
     defaults = Defaults(parse_mode=ParseMode.HTML)
     builder = Application.builder().token(config.telegram.token).defaults(defaults)
+
+    ca_bundle = _resolve_ca_bundle(config.telegram.ca_bundle)
+    if ca_bundle:
+        if Path(ca_bundle).is_file():
+            # Доверяем корпоративному прокси: httpx получает свой набор ЦС.
+            builder = builder.request(
+                HTTPXRequest(httpx_kwargs={"verify": ca_bundle})
+            ).get_updates_request(HTTPXRequest(httpx_kwargs={"verify": ca_bundle}))
+            log.info("Дополнительный набор сертификатов: %s", ca_bundle)
+        else:
+            log.warning("Файл ca_bundle не найден: %s — продолжаю с системным набором", ca_bundle)
 
     if config.telegram.api_base:
         root = config.telegram.api_base.rstrip("/")
@@ -488,7 +515,7 @@ def create_app(config: Config, storage: Storage) -> Application:
     app.add_handler(CommandHandler("down", cmd_down))
     app.add_handler(CommandHandler(["check", "test"], cmd_check))
     app.add_handler(CommandHandler("scan", cmd_scan))
-    app.add_handler(CommandHandler(["scan-add", "scanadd"], cmd_scan_add))
+    app.add_handler(CommandHandler(["scan_add", "scanadd"], cmd_scan_add))
     app.add_handler(CommandHandler("add", cmd_add))
     app.add_handler(CommandHandler(["remove", "del"], cmd_remove))
     app.add_handler(CommandHandler("enable", cmd_enable))

@@ -1,4 +1,4 @@
-"""Точка входа: ``python -m netmon`` — бот, ``check`` — разовая проверка, ``scan`` — поиск узлов."""
+"""Точка входа: ``python -m netmon`` — бот, ``check`` — разовая проверка, ``scan`` — поиск узлов, ``certs`` — набор ЦС."""
 
 from __future__ import annotations
 
@@ -99,6 +99,26 @@ async def _run_scan(config, args) -> int:
     return 0
 
 
+def _run_certs(config, args) -> int:
+    from .certs import DEFAULT_BUNDLE, build_bundle
+
+    target = args.output or config.telegram.ca_bundle or str(DEFAULT_BUNDLE)
+    if target.lower() == "auto":
+        target = str(DEFAULT_BUNDLE)
+
+    path, added = build_bundle(target)
+    print(f"Набор сертификатов: {path} ({path.stat().st_size} байт, системных корней: {added})")
+
+    if not config.telegram.ca_bundle:
+        shown = str(path).replace("\\", "/")
+        print(
+            "Чтобы бот его использовал, добавьте в config.yaml:\n"
+            "  telegram:\n"
+            f"    ca_bundle: {shown}"
+        )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="netmon",
@@ -117,6 +137,13 @@ def build_parser() -> argparse.ArgumentParser:
     scan_parser.add_argument("--add", action="store_true", help="добавить найденные узлы в мониторинг")
     scan_parser.add_argument("-t", "--timeout", type=float, default=None, help="таймаут отклика, сек")
 
+    certs_parser = subparsers.add_parser(
+        "certs", help="собрать набор доверенных ЦС из системного хранилища"
+    )
+    certs_parser.add_argument(
+        "-o", "--output", default=None, help="куда записать (по умолчанию certs/ca-bundle.pem)"
+    )
+
     return parser
 
 
@@ -134,6 +161,8 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(_run_check(config, args.targets, args.timeout))
     if args.command == "scan":
         return asyncio.run(_run_scan(config, args))
+    if args.command == "certs":
+        return _run_certs(config, args)
 
     if not config.telegram.token:
         print(

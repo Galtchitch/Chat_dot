@@ -19,6 +19,8 @@ class TelegramConfig:
     token: str = ""
     api_base: str = ""
     admin_ids: tuple[int, ...] = ()
+    #: Путь к PEM-набору доверенных ЦС или "auto" для сборки из хранилища системы.
+    ca_bundle: str = ""
 
 
 @dataclass
@@ -137,6 +139,7 @@ def load_config(path: str | Path | None = None) -> Config:
         token=os.environ.get("TELEGRAM_BOT_TOKEN") or str(tg_raw.get("token") or ""),
         api_base=str(tg_raw.get("api_base") or "").strip(),
         admin_ids=_int_tuple(os.environ.get("NETMON_ADMIN_IDS") or tg_raw.get("admin_ids")),
+        ca_bundle=str(os.environ.get("NETMON_CA_BUNDLE") or tg_raw.get("ca_bundle") or "").strip(),
     )
 
     monitor = MonitorConfig(
