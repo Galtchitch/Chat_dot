@@ -63,7 +63,7 @@ async def _run_check(config, targets: list[str], timeout: float | None) -> int:
 
 async def _run_scan(config, args) -> int:
     from .models import Host
-    from .scan import live_hosts, resolve_targets
+    from .scan import live_hosts, pick_name, resolve_targets
     from .storage import Storage
 
     targets, unknown = resolve_targets(config.networks, args.targets)
@@ -76,26 +76,50 @@ async def _run_scan(config, args) -> int:
 
     storage = Storage(config.database) if args.add else None
     timeout = args.timeout or config.scan.timeout
+    with_names = config.scan.resolve_names and not args.no_names
     added_total = 0
+    renamed_total = 0
 
     for title, cidr, network in targets:
-        live, total = await live_hosts(cidr, timeout, config.scan.workers, config.scan.max_hosts)
+        live, total = await live_hosts(
+            cidr,
+            timeout,
+            config.scan.workers,
+            config.scan.max_hosts,
+            names=with_names,
+            name_timeout=config.scan.name_timeout,
+        )
         print(f"\n{title} ({cidr}): живых {len(live)} из {total}")
-        for address, latency in live:
-            suffix = f"{latency:.0f} мс" if latency is not None else ""
-            print(f"  {address:<16} {suffix}")
+        for address, latency, name in live:
+            latency_text = f"{latency:.0f} мс" if latency is not None else ""
+            print(f"  {address:<16} {name:<20} {latency_text}")
+
         if storage is not None:
             added = 0
-            for address, _latency in live:
-                if storage.find_host(address) is not None:
+            renamed = 0
+            for address, _latency, name in live:
+                existing = storage.find_host(address)
+                if existing is not None:
+                    if name and existing.name == existing.address:
+                        candidate = pick_name(storage, name, address)
+                        if candidate != existing.name and storage.rename_host(existing.name, candidate):
+                            renamed += 1
                     continue
-                storage.add_host(Host(name=address, address=address, network=network))
+                host_name = pick_name(storage, name, address)
+                storage.add_host(Host(name=host_name, address=address, network=network))
                 added += 1
             added_total += added
-            print(f"  добавлено в мониторинг: {added}")
+            renamed_total += renamed
+            line = f"  добавлено в мониторинг: {added}"
+            if renamed:
+                line += f", уточнено имён: {renamed}"
+            print(line)
 
     if storage is not None:
-        print(f"\nВсего добавлено: {added_total}")
+        summary = f"\nВсего добавлено: {added_total}"
+        if renamed_total:
+            summary += f", уточнено имён: {renamed_total}"
+        print(summary)
     return 0
 
 
@@ -135,6 +159,7 @@ def build_parser() -> argparse.ArgumentParser:
     scan_parser = subparsers.add_parser("scan", help="просканировать подсети и показать живые узлы")
     scan_parser.add_argument("targets", nargs="*", help="имена сетей из config.yaml или CIDR; без них — все сети")
     scan_parser.add_argument("--add", action="store_true", help="добавить найденные узлы в мониторинг")
+    scan_parser.add_argument("--no-names", action="store_true", help="не определять имена узлов (быстрее)")
     scan_parser.add_argument("-t", "--timeout", type=float, default=None, help="таймаут отклика, сек")
 
     certs_parser = subparsers.add_parser(

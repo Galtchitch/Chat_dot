@@ -52,7 +52,8 @@ def _ping_command(host: str, timeout: float) -> list[str]:
     return [PING_BIN, "-c", "1", "-W", str(max(1, int(round(timeout)))), host]
 
 
-async def _run_command(cmd: list[str], timeout: float) -> tuple[int, str] | None:
+async def run_command(cmd: list[str], timeout: float) -> tuple[int, str] | None:
+    """Выполнить команду и вернуть код возврата и объединённый вывод."""
     process = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
@@ -70,7 +71,7 @@ async def _run_command(cmd: list[str], timeout: float) -> tuple[int, str] | None
 async def ping(host: str, timeout: float = 3.0) -> CheckResult:
     """Проверка доступности через системную утилиту ``ping``."""
     try:
-        outcome = await _run_command(_ping_command(host, timeout), timeout)
+        outcome = await run_command(_ping_command(host, timeout), timeout)
     except FileNotFoundError:
         return CheckResult(False, None, "утилита ping не найдена в системе")
     except OSError as exc:

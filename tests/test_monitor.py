@@ -15,8 +15,9 @@ from netmon.checks import CheckResult
 from netmon.config import Config, MonitorConfig, NetworkConfig
 from netmon.models import Host
 from netmon.monitor import Event, Monitor
+from netmon.names import parse_nbtstat, resolve, short_name
 from netmon.schedule import Clock, parse_window
-from netmon.scan import live_hosts, resolve_targets
+from netmon.scan import live_hosts, pick_name, resolve_targets
 from netmon.storage import Storage
 
 FAIL = CheckResult(False, None, "нет ответа")
@@ -256,6 +257,27 @@ class StorageTest(unittest.TestCase):
         self.storage.set_notify(1, True)
         self.assertEqual(self.storage.list_subscribers(notify_only=True), [(1, True)])
 
+    def test_rename_host_keeps_state(self) -> None:
+        self.storage.add_host(Host(name="192.168.124.1", address="192.168.124.1"))
+        self.storage.add_host(Host(name="nas", address="192.168.147.10"))
+        self.storage.update_state(
+            "192.168.124.1",
+            ok=False,
+            consecutive_failures=2,
+            latency=None,
+            detail="нет ответа",
+            changed_at=10.0,
+            last_notified=None,
+        )
+        self.assertTrue(self.storage.rename_host("192.168.124.1", "gw-124"))
+        renamed = self.storage.get_host("gw-124")
+        self.assertEqual(renamed.address, "192.168.124.1")
+        self.assertFalse(renamed.ok)
+        self.assertEqual(renamed.consecutive_failures, 2)
+        self.assertIsNone(self.storage.get_host("192.168.124.1"))
+        self.assertFalse(self.storage.rename_host("gw-124", "nas"), "имя занято")
+        self.assertFalse(self.storage.rename_host("нет-такого", "другое"))
+
     def test_outbox(self) -> None:
         self.storage.add_outbox(1.0, "a", "down", "таймаут")
         self.storage.add_outbox(2.0, "a", "up", "")
@@ -300,7 +322,97 @@ class ScanTest(unittest.IsolatedAsyncioTestCase):
     async def test_live_hosts_localhost(self) -> None:
         live, total = await live_hosts("127.0.0.1/32", timeout=2.0, workers=2)
         self.assertEqual(total, 1)
-        self.assertIn("127.0.0.1", [address for address, _ in live])
+        self.assertEqual([address for address, _latency, _name in live], ["127.0.0.1"])
+
+    async def test_names_can_be_skipped(self) -> None:
+        live, _total = await live_hosts("127.0.0.1/32", timeout=2.0, workers=2, names=False)
+        self.assertEqual([name for _address, _latency, name in live], [""])
+
+
+class PickNameTest(unittest.TestCase):
+    """Имя узла: найденное, если свободно, иначе адрес."""
+
+    def setUp(self) -> None:
+        self.storage = make_storage(self)
+        self.storage.add_host(Host(name="nas", address="192.168.147.10"))
+
+    def test_uses_resolved_name(self) -> None:
+        self.assertEqual(pick_name(self.storage, "gw-124", "192.168.124.1"), "gw-124")
+
+    def test_falls_back_to_address(self) -> None:
+        self.assertEqual(pick_name(self.storage, "", "192.168.124.1"), "192.168.124.1")
+        self.assertEqual(pick_name(self.storage, "   ", "192.168.124.1"), "192.168.124.1")
+
+    def test_avoids_collision_with_other_host(self) -> None:
+        self.assertEqual(pick_name(self.storage, "nas", "192.168.124.1"), "192.168.124.1")
+
+    def test_same_address_keeps_name(self) -> None:
+        self.assertEqual(pick_name(self.storage, "nas", "192.168.147.10"), "nas")
+
+
+# --------------------------------------------------------------------- имена
+
+
+class NamesTest(unittest.IsolatedAsyncioTestCase):
+    def test_short_name(self) -> None:
+        self.assertEqual(short_name("server01.corp.local"), "server01")
+        self.assertEqual(short_name("server01."), "server01")
+        self.assertEqual(short_name("  NAS  "), "NAS")
+        self.assertEqual(short_name(""), "")
+        self.assertEqual(short_name("   "), "")
+
+    def test_parse_nbtstat(self) -> None:
+        output = (
+            "\nИмя узла NetBIOS     Тип        Состояние\n"
+            "----------------------------------------------\n"
+            "SERVER01             <00>  UNIQUE      Registered\n"
+            "SERVER01             <20>  UNIQUE      Registered\n"
+            "WORKGROUP            <00>  GROUP       Registered\n"
+        )
+        self.assertEqual(parse_nbtstat(output), "SERVER01")
+        # Служебные имена браузеров пропускаем.
+        self.assertEqual(parse_nbtstat("__MSBROWSE__   <00>  UNIQUE  Registered"), "")
+        self.assertEqual(parse_nbtstat(""), "")
+
+    async def test_resolve_returns_string(self) -> None:
+        name = await resolve("127.0.0.1", timeout=5.0)
+        self.assertIsInstance(name, str)
+
+    async def test_resolve_empty_address(self) -> None:
+        self.assertEqual(await resolve("", timeout=1.0), "")
+
+
+# ------------------------------------------------------------- вид в сообщениях
+
+
+class HostFormatTest(unittest.TestCase):
+    def test_ip_as_name_is_not_duplicated(self) -> None:
+        from netmon.bot import _fmt_host
+
+        line = _fmt_host(Host(name="192.168.124.1", address="192.168.124.1", ok=False))
+        self.assertEqual(line.count("192.168.124.1"), 1)
+        self.assertNotIn("<code>", line)
+
+    def test_real_name_shown_with_address(self) -> None:
+        from netmon.bot import _fmt_host
+
+        line = _fmt_host(Host(name="gw-124", address="192.168.124.1", ok=True))
+        self.assertIn("gw-124", line)
+        self.assertIn("192.168.124.1", line)
+
+    def test_port_shown_when_name_is_address(self) -> None:
+        from netmon.bot import _fmt_host
+
+        line = _fmt_host(
+            Host(name="192.168.147.10", address="192.168.147.10", kind="tcp", port=445, ok=True)
+        )
+        self.assertIn("192.168.147.10:445", line)
+
+    def test_scan_line_contains_name(self) -> None:
+        from netmon.bot import _live_line
+
+        self.assertEqual(_live_line("192.168.124.1", 3.4, "gw-124"), "  <code>192.168.124.1</code> <b>gw-124</b> — 3 мс")
+        self.assertEqual(_live_line("192.168.124.1", None, ""), "  <code>192.168.124.1</code>")
 
 
 # ------------------------------------------------- настройки и сертификаты
@@ -339,6 +451,17 @@ class ConfigTest(unittest.TestCase):
         path = self._write("networks:\n  - name: N\n    cidr: 300.0.0.0/24\n")
         with self.assertRaises(ValueError):
             load_config(path)
+
+    def test_scan_name_options(self) -> None:
+        from netmon.config import load_config
+
+        config = load_config(self._write("scan:\n  resolve_names: false\n  name_timeout: 5\n"))
+        self.assertFalse(config.scan.resolve_names)
+        self.assertEqual(config.scan.name_timeout, 5.0)
+
+        defaults = load_config(self._write("telegram:\n  token: \"\"\n"))
+        self.assertTrue(defaults.scan.resolve_names)
+        self.assertEqual(defaults.scan.name_timeout, 2.0)
 
 
 class CertsTest(unittest.TestCase):

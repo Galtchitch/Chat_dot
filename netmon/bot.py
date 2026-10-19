@@ -24,7 +24,7 @@ from .config import Config, NetworkConfig
 from .models import KINDS, Host
 from .monitor import Monitor
 from .notify import Notifier, format_event
-from .scan import live_hosts, resolve_targets
+from .scan import live_hosts, pick_name, resolve_targets
 from .schedule import Clock
 from .storage import Storage
 
@@ -94,10 +94,11 @@ def _human_duration(seconds: float) -> str:
 
 
 def _fmt_host(host: Host) -> str:
-    line = (
-        f"{STATUS_EMOJI[host.ok]} <b>{html.escape(host.name)}</b>"
-        f" (<code>{html.escape(host.target)}</code>)"
-    )
+    title = f"<b>{html.escape(host.name)}</b>"
+    # Если узел назван по адресу, не дублируем одно и то же.
+    if host.target.strip() != host.name.strip():
+        title += f" (<code>{html.escape(host.target)}</code>)"
+    line = f"{STATUS_EMOJI[host.ok]} {title}"
     extras: list[str] = []
     if host.ok is None:
         extras.append("ещё не проверялся")
@@ -113,6 +114,16 @@ def _fmt_host(host: Host) -> str:
         extras.append("проверки отключены")
     if extras:
         line += " — " + ", ".join(extras)
+    return line
+
+
+def _live_line(address: str, latency: float | None, name: str) -> str:
+    """Строка результата сканирования: адрес, имя и задержка."""
+    line = f"  <code>{html.escape(address)}</code>"
+    if name:
+        line += f" <b>{html.escape(name)}</b>"
+    if latency is not None:
+        line += f" — {latency:.0f} мс"
     return line
 
 
@@ -381,13 +392,15 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     blocks = []
     for title, cidr, _network in targets:
         live, total = await live_hosts(
-            cidr, config.scan.timeout, config.scan.workers, config.scan.max_hosts
+            cidr,
+            config.scan.timeout,
+            config.scan.workers,
+            config.scan.max_hosts,
+            names=config.scan.resolve_names,
+            name_timeout=config.scan.name_timeout,
         )
         if live:
-            shown = "\n".join(
-                f"  <code>{address}</code>" + (f" — {latency:.0f} мс" if latency is not None else "")
-                for address, latency in live[:60]
-            )
+            shown = "\n".join(_live_line(*item) for item in live[:60])
             if len(live) > 60:
                 shown += f"\n  … и ещё {len(live) - 60}"
         else:
@@ -413,20 +426,47 @@ async def cmd_scan_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "🔍 Сканирую и добавляю: " + ", ".join(cidr for _title, cidr, _n in targets)
     )
     added_total = 0
+    renamed_total = 0
     blocks = []
     for title, cidr, network in targets:
         live, total = await live_hosts(
-            cidr, config.scan.timeout, config.scan.workers, config.scan.max_hosts
+            cidr,
+            config.scan.timeout,
+            config.scan.workers,
+            config.scan.max_hosts,
+            names=config.scan.resolve_names,
+            name_timeout=config.scan.name_timeout,
         )
-        added = 0
-        for address, _latency in live:
-            if storage.find_host(address) is not None:
+        added_names: list[str] = []
+        renamed = 0
+        for address, _latency, name in live:
+            existing = storage.find_host(address)
+            if existing is not None:
+                # Узел уже под мониторингом: уточним имя, если он назван по адресу.
+                if name and existing.name == existing.address:
+                    candidate = pick_name(storage, name, address)
+                    if candidate != existing.name and storage.rename_host(existing.name, candidate):
+                        renamed += 1
                 continue
-            storage.add_host(Host(name=address, address=address, network=network))
-            added += 1
-        added_total += added
-        blocks.append(f"<b>{html.escape(title)}</b> ({cidr}): найдено {len(live)} из {total}, добавлено {added}")
-    await update.message.reply_text("\n".join(blocks) + f"\n\nВсего добавлено: {added_total}")
+            host_name = pick_name(storage, name, address)
+            storage.add_host(Host(name=host_name, address=address, network=network))
+            added_names.append(host_name)
+            added_total += 1
+        renamed_total += renamed
+        shown = ""
+        if added_names:
+            shown = "\n  " + ", ".join(html.escape(item) for item in added_names[:25])
+            if len(added_names) > 25:
+                shown += f" … и ещё {len(added_names) - 25}"
+        blocks.append(
+            f"<b>{html.escape(title)}</b> ({cidr}): найдено {len(live)} из {total}, "
+            f"добавлено {len(added_names)}, уточнено имён {renamed}{shown}"
+        )
+
+    summary = f"\n\nВсего добавлено: {added_total}"
+    if renamed_total:
+        summary += f", уточнено имён: {renamed_total}"
+    await update.message.reply_text("\n".join(blocks) + summary)
 
 
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:

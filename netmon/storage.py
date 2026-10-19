@@ -194,6 +194,20 @@ class Storage:
             self._conn.commit()
         return cursor.rowcount > 0
 
+    def rename_host(self, old_name: str, new_name: str) -> bool:
+        """Переименовать узел, сохранив его состояние. False — имя занято."""
+        with self._lock:
+            taken = self._conn.execute(
+                "SELECT 1 FROM hosts WHERE name = ? COLLATE NOCASE", (new_name,)
+            ).fetchone()
+            if taken:
+                return False
+            cursor = self._conn.execute(
+                "UPDATE hosts SET name = ? WHERE name = ? COLLATE NOCASE", (new_name, old_name)
+            )
+            self._conn.commit()
+        return cursor.rowcount > 0
+
     def update_state(
         self,
         name: str,

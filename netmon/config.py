@@ -45,6 +45,9 @@ class ScanConfig:
     timeout: float = 1.0
     workers: int = 256
     max_hosts: int = 4096
+    #: Определять имена найденных узлов (обратный DNS, затем NetBIOS).
+    resolve_names: bool = True
+    name_timeout: float = 2.0
 
 
 @dataclass
@@ -159,6 +162,8 @@ def load_config(path: str | Path | None = None) -> Config:
         timeout=max(0.2, _as_float(scan_raw.get("timeout"), 1.0)),
         workers=max(1, _as_int(scan_raw.get("workers"), 256)),
         max_hosts=max(1, _as_int(scan_raw.get("max_hosts"), 4096)),
+        resolve_names=bool(scan_raw.get("resolve_names", True)),
+        name_timeout=max(0.5, _as_float(scan_raw.get("name_timeout"), 2.0)),
     )
 
     seed_hosts = [item for item in (raw.get("hosts") or []) if isinstance(item, dict)]
