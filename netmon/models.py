@@ -28,6 +28,8 @@ class Host:
     consecutive_failures: int = 0
     changed_at: float | None = None
     last_notified: float | None = None
+    #: Когда узел проверяли последний раз (любой результат).
+    checked_at: float | None = None
     latency: float | None = None
     detail: str = ""
 

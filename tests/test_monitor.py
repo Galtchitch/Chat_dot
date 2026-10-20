@@ -9,6 +9,7 @@ import tempfile
 import time
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest import mock
 
 from netmon.checks import CheckResult
@@ -161,6 +162,38 @@ class MonitorTest(unittest.IsolatedAsyncioTestCase):
         )
         await self._apply(FAIL)
         self.assertEqual([kind for kind, _ in self.events], ["down", "still_down"])
+
+    async def test_checked_at_is_saved(self) -> None:
+        self._add()
+        await self._apply(OK)
+        self.assertIsNotNone(self.storage.get_host("node").checked_at)
+
+    async def test_pending_failure_survives_and_counts(self) -> None:
+        self._add()
+        await self._apply(FAIL)
+        host = self.storage.get_host("node")
+        self.assertEqual(host.consecutive_failures, 1)
+        self.assertIsNone(host.ok, "пока порог не достигнут, состояние не меняется")
+        self.assertEqual(host.detail, "нет ответа")
+
+    async def test_broken_check_does_not_stop_the_tick(self) -> None:
+        self.storage.add_host(Host(name="node", address="10.0.0.1"))
+        self.storage.add_host(Host(name="other", address="10.0.0.2"))
+
+        async def fake_check(host, timeout):
+            if host.name == "node":
+                raise RuntimeError("сломалось")
+            return OK
+
+        with mock.patch("netmon.monitor.check", new=fake_check):
+            await self.monitor._tick()
+
+        broken = self.storage.get_host("node")
+        self.assertEqual(broken.consecutive_failures, 1)
+        self.assertIn("ошибка проверки", broken.detail)
+        self.assertIsNotNone(broken.checked_at)
+        # Соседний узел всё равно проверен.
+        self.assertTrue(self.storage.get_host("other").ok)
 
 
 # ------------------------------------------------------------ окно и сводка
@@ -414,9 +447,114 @@ class HostFormatTest(unittest.TestCase):
         self.assertEqual(_live_line("192.168.124.1", 3.4, "gw-124"), "  <code>192.168.124.1</code> <b>gw-124</b> — 3 мс")
         self.assertEqual(_live_line("192.168.124.1", None, ""), "  <code>192.168.124.1</code>")
 
+    def test_pending_failure_is_yellow(self) -> None:
+        from netmon.bot import _fmt_host, _host_emoji
+
+        host = Host(name="nas", address="192.168.147.10", ok=True, consecutive_failures=1)
+        self.assertEqual(_host_emoji(host), "🟡")
+        self.assertIn("нет ответа 1 из 2", _fmt_host(host))
+        self.assertEqual(_host_emoji(Host(name="a", address="1.1.1.1", ok=True)), "🟢")
+        self.assertEqual(_host_emoji(Host(name="a", address="1.1.1.1", ok=False)), "🔴")
+        self.assertEqual(_host_emoji(Host(name="a", address="1.1.1.1")), "⚪")
+
+    def test_stale_check_is_reported(self) -> None:
+        from netmon.bot import _fmt_host, _freshness_line
+
+        old = Host(name="a", address="1.1.1.1", ok=True, checked_at=time.time() - 3600)
+        self.assertIn("не выполняются", _freshness_line([old], 60))
+        self.assertIn("проверок нет", _fmt_host(old))
+
+        fresh = Host(name="a", address="1.1.1.1", ok=True, checked_at=time.time())
+        self.assertIn("Проверки идут", _freshness_line([fresh], 60))
+        self.assertNotIn("проверок нет", _fmt_host(fresh))
+
+        self.assertIn("ещё не было", _freshness_line([Host(name="a", address="1.1.1.1")], 60))
+
+
+# ------------------------------------------------------------------- журнал
+
+
+class LoggingTest(unittest.TestCase):
+    def test_log_file_next_to_database(self) -> None:
+        from netmon.__main__ import _log_file
+
+        self.assertEqual(
+            _log_file(Config(database="data/netmon.sqlite3")), Path("data") / "netmon.log"
+        )
+        self.assertIsNone(_log_file(Config(database=":memory:")))
+        self.assertIsNone(_log_file(Config(database="")))
+
+
+# ---------------------------------------------------------------------- ping
+
+
+class PingTest(unittest.IsolatedAsyncioTestCase):
+    """Главная ловушка: Windows возвращает код 0 и на «узел недоступен»."""
+
+    UNREACHABLE = (
+        "\r\nОбмен пакетами с 192.168.124.39 по с 32 байтами данных:\r\n"
+        "Ответ от 192.168.124.78: Заданный узел недоступен.\r\n\r\n"
+        "Статистика Ping для 192.168.124.39:\r\n"
+        "    Пакетов: отправлено = 1, получено = 1, потеряно = 0\r\n"
+        "    (0% потерь)\r\n"
+    )
+    REPLY = (
+        "\r\nОбмен пакетами с 192.168.124.1 по с 32 байтами данных:\r\n"
+        "Ответ от 192.168.124.1: число байт=32 время<1мс TTL=64\r\n\r\n"
+        "Статистика Ping для 192.168.124.1:\r\n"
+        "    Пакетов: отправлено = 1, получено = 1, потеряно = 0\r\n"
+        "    (0% потерь)\r\n"
+    )
+    TIMEOUT = (
+        "\r\nОбмен пакетами с 192.168.124.222 по с 32 байтами данных:\r\n"
+        "Превышен интервал ожидания для запроса.\r\n\r\n"
+        "    Пакетов: отправлено = 1, получено = 0, потеряно = 1\r\n"
+        "    (100% потерь)\r\n"
+    )
+
+    def test_ping_ok_recognises_real_reply(self) -> None:
+        from netmon.checks import _ping_ok
+
+        self.assertTrue(_ping_ok(0, self.REPLY))
+        self.assertTrue(_ping_ok(0, "64 bytes from 1.1.1.1: icmp_seq=1 ttl=57 time=12.3 ms"))
+        # IPv6-вывод Windows: время есть, TTL нет.
+        self.assertTrue(_ping_ok(0, "\r\nОтвет от ::1: время<1мс\r\n"))
+
+    def test_ping_ok_rejects_unreachable_with_exit_zero(self) -> None:
+        from netmon.checks import _ping_ok
+
+        self.assertFalse(_ping_ok(0, self.UNREACHABLE), "это ответ маршрутизатора, не узла")
+        self.assertFalse(_ping_ok(0, self.TIMEOUT))
+        self.assertFalse(_ping_ok(1, self.REPLY))
+
+    def test_failure_detail_is_readable(self) -> None:
+        from netmon.checks import _ping_detail
+
+        self.assertIn("Заданный узел недоступен", _ping_detail(self.UNREACHABLE, 0))
+        self.assertIn("Превышен интервал", _ping_detail(self.TIMEOUT, 1))
+
+    async def test_ping_marks_unreachable_as_down(self) -> None:
+        from netmon.checks import ping
+
+        with mock.patch(
+            "netmon.checks.run_command", new=mock.AsyncMock(return_value=(0, self.UNREACHABLE))
+        ):
+            result = await ping("192.168.124.39", 1.0)
+        self.assertFalse(result.ok)
+        self.assertIn("недоступен", result.detail)
+
+    async def test_ping_marks_reply_as_up(self) -> None:
+        from netmon.checks import ping
+
+        with mock.patch(
+            "netmon.checks.run_command", new=mock.AsyncMock(return_value=(0, self.REPLY))
+        ):
+            result = await ping("192.168.124.1", 1.0)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.latency_ms, 1.0)
+
 
 # ------------------------------------------------- настройки и сертификаты
-
 
 class ConfigTest(unittest.TestCase):
     def _write(self, text: str) -> str:

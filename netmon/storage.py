@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS hosts (
     consecutive_failures INTEGER NOT NULL DEFAULT 0,
     changed_at           REAL,
     last_notified        REAL,
+    checked_at           REAL,
     latency              REAL,
     detail               TEXT NOT NULL DEFAULT ''
 );
@@ -61,6 +62,7 @@ def _row_to_host(row: sqlite3.Row) -> Host:
         consecutive_failures=row["consecutive_failures"],
         changed_at=row["changed_at"],
         last_notified=row["last_notified"],
+        checked_at=row["checked_at"],
         latency=row["latency"],
         detail=row["detail"] or "",
     )
@@ -87,6 +89,8 @@ class Storage:
         columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(hosts)")}
         if "network" not in columns:
             self._conn.execute("ALTER TABLE hosts ADD COLUMN network TEXT NOT NULL DEFAULT ''")
+        if "checked_at" not in columns:
+            self._conn.execute("ALTER TABLE hosts ADD COLUMN checked_at REAL")
 
     def close(self) -> None:
         with self._lock:
@@ -218,12 +222,13 @@ class Storage:
         detail: str,
         changed_at: float | None,
         last_notified: float | None,
+        checked_at: float | None = None,
     ) -> None:
         with self._lock:
             self._conn.execute(
                 """
                 UPDATE hosts SET ok = ?, consecutive_failures = ?, latency = ?, detail = ?,
-                                 changed_at = ?, last_notified = ?
+                                 changed_at = ?, last_notified = ?, checked_at = ?
                 WHERE name = ?
                 """,
                 (
@@ -233,6 +238,7 @@ class Storage:
                     detail or "",
                     changed_at,
                     last_notified,
+                    checked_at,
                     name,
                 ),
             )

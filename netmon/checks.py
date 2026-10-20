@@ -22,6 +22,22 @@ _LATENCY_RE = re.compile(
     re.IGNORECASE,
 )
 
+#: Признак настоящего ответа узла: в строке есть TTL. У сообщений «узел
+#: недоступен» от маршрутизатора TTL нет.
+_REPLY_RE = re.compile(r"\bttl[=:]\s*\d+", re.IGNORECASE)
+
+#: Строки, которыми ping сообщает, что узел не ответил.
+_UNREACHABLE_MARKERS = (
+    "недоступен",
+    "не найден",
+    "не удалось достичь",
+    "unreachable",
+    "превышен интервал",
+    "timed out",
+    "timeout",
+    "destination host",
+)
+
 
 @dataclass
 class CheckResult:
@@ -68,6 +84,31 @@ async def run_command(cmd: list[str], timeout: float) -> tuple[int, str] | None:
     return process.returncode or 0, _decode(output)
 
 
+def _ping_ok(code: int, output: str) -> bool:
+    """Успех — только ответ самого узла.
+
+    Windows возвращает код 0 и на сообщение «Ответ от <маршрутизатор>:
+    Заданный узел недоступен», поэтому одного кода возврата недостаточно.
+    Настоящий ответ содержит TTL, а в IPv6-выводе — хотя бы время отклика.
+    """
+    if code != 0:
+        return False
+    lowered = output.lower()
+    if any(marker in lowered for marker in _UNREACHABLE_MARKERS):
+        return False
+    return bool(_REPLY_RE.search(output) or _LATENCY_RE.search(output))
+
+
+def _ping_detail(output: str, code: int) -> str:
+    """Понятная причина отказа для сообщения и статуса."""
+    for line in output.splitlines():
+        text = line.strip()
+        if text and any(marker in text.lower() for marker in _UNREACHABLE_MARKERS):
+            return text[:180]
+    lines = output.strip().splitlines()
+    return (lines[-1].strip() if lines else f"код возврата {code}")[:180]
+
+
 async def ping(host: str, timeout: float = 3.0) -> CheckResult:
     """Проверка доступности через системную утилиту ``ping``."""
     try:
@@ -80,9 +121,8 @@ async def ping(host: str, timeout: float = 3.0) -> CheckResult:
     if outcome is None:
         return CheckResult(False, None, f"таймаут {timeout:g} с")
     code, output = outcome
-    if code != 0:
-        tail = output.strip().splitlines()[-1] if output.strip() else f"код возврата {code}"
-        return CheckResult(False, None, tail[:180])
+    if not _ping_ok(code, output):
+        return CheckResult(False, None, _ping_detail(output, code))
 
     match = _LATENCY_RE.search(output)
     latency = float(match.group(1).replace(",", ".")) if match else None

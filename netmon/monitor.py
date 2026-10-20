@@ -74,8 +74,18 @@ class Monitor:
         due = [host for host in hosts if self._next_due.get(host.name, 0.0) <= now]
         if not due:
             return
-        results = await asyncio.gather(*(self._probe(host) for host in due))
-        await self._apply(results)
+        outcomes = await asyncio.gather(
+            *(self._probe(host) for host in due), return_exceptions=True
+        )
+        pairs: list[tuple[Host, CheckResult]] = []
+        for host, outcome in zip(due, outcomes):
+            if isinstance(outcome, BaseException):
+                # Одна сломанная проверка не должна останавливать весь цикл.
+                log.error("Проверка %s завершилась ошибкой: %s", host.name, outcome)
+                pairs.append((host, CheckResult(False, None, f"ошибка проверки: {outcome}"[:180])))
+            else:
+                pairs.append(outcome)
+        await self._apply(pairs)
 
     async def _probe(self, host: Host) -> tuple[Host, CheckResult]:
         async with self._semaphore:
@@ -131,7 +141,21 @@ class Monitor:
                 detail=result.detail,
                 changed_at=changed_at,
                 last_notified=last_notified,
+                checked_at=now,
             )
+
+            log.debug(
+                "%s: ok=%s неудач=%s задержка=%s %s",
+                stored.name,
+                new_ok,
+                failures,
+                result.latency_ms,
+                result.detail[:80],
+            )
+            if kind:
+                log.info(
+                    "Событие %s: %s (неудач подряд: %s)", kind, stored.name, failures
+                )
 
             if emit and kind:
                 fresh = self.storage.get_host(stored.name)
@@ -165,6 +189,10 @@ class Monitor:
 
     async def probe_now(self, host: Host, emit: bool = False) -> CheckResult:
         """Проверить узел немедленно (используется командами бота)."""
-        pair = await self._probe(host)
+        try:
+            pair = await self._probe(host)
+        except Exception as exc:  # noqa: BLE001 - команда не должна падать
+            log.error("Проверка %s завершилась ошибкой: %s", host.name, exc)
+            pair = (host, CheckResult(False, None, f"ошибка проверки: {exc}"[:180]))
         await self._apply([pair], emit=emit)
         return pair[1]

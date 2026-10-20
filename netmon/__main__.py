@@ -6,18 +6,40 @@ import argparse
 import asyncio
 import logging
 import sys
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 from .config import load_config
 
 LOG_FORMAT = "%(asctime)s %(levelname)-7s %(name)s: %(message)s"
+LOG_MAX_BYTES = 1_000_000
+LOG_BACKUPS = 3
 
 
-def setup_logging(level: str) -> None:
+def setup_logging(level: str, log_path: str | Path | None = None) -> None:
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    if log_path:
+        path = Path(log_path)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            handlers.append(
+                RotatingFileHandler(
+                    path, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUPS, encoding="utf-8"
+                )
+            )
+        except OSError:
+            pass  # без файла журнала работаем дальше, только в консоль
+
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO),
         format=LOG_FORMAT,
         datefmt="%Y-%m-%d %H:%M:%S",
+        handlers=handlers,
+        force=True,
     )
+    # httpx пишет строку на каждый запрос при опросе Telegram — это шум.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     # Консоль Windows по умолчанию не умеет выводить кириллицу.
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
@@ -26,6 +48,14 @@ def setup_logging(level: str) -> None:
                 reconfigure(encoding="utf-8", errors="replace")
             except (ValueError, OSError):
                 pass
+
+
+def _log_file(config) -> Path | None:
+    """Журнал кладём рядом с базой: data/netmon.log."""
+    database = (config.database or "").strip()
+    if not database or database == ":memory:":
+        return None
+    return Path(database).expanduser().parent / "netmon.log"
 
 
 async def _run_check(config, targets: list[str], timeout: float | None) -> int:
@@ -174,13 +204,18 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    setup_logging(args.log_level)
 
     try:
         config = load_config(args.config)
     except ValueError as exc:
+        setup_logging(args.log_level)
         print(f"Ошибка в конфигурации: {exc}", file=sys.stderr)
         return 2
+
+    log_path = _log_file(config)
+    setup_logging(args.log_level, log_path)
+    if log_path:
+        logging.getLogger("netmon").info("Журнал: %s", log_path)
 
     if args.command == "check":
         return asyncio.run(_run_check(config, args.targets, args.timeout))

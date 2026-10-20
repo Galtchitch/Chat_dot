@@ -6,6 +6,7 @@ import asyncio
 import html
 import ipaddress
 import logging
+import os
 from pathlib import Path
 import time
 
@@ -29,8 +30,6 @@ from .schedule import Clock
 from .storage import Storage
 
 log = logging.getLogger("netmon.bot")
-
-STATUS_EMOJI = {True: "🟢", False: "🔴", None: "⚪"}
 
 COMMANDS = [
     BotCommand("status", "Состояние узлов по сетям"),
@@ -93,23 +92,42 @@ def _human_duration(seconds: float) -> str:
     return f"{days} д {hours} ч"
 
 
-def _fmt_host(host: Host) -> str:
+def _host_emoji(host: Host) -> str:
+    """🟢 доступен, 🟡 доступен, но последняя проверка не прошла, 🔴 недоступен."""
+    if host.ok is None:
+        return "⚪"
+    if not host.ok:
+        return "🔴"
+    return "🟡" if host.consecutive_failures else "🟢"
+
+
+def _fmt_host(host: Host, default_interval: int = 60, flap_threshold: int = 2) -> str:
     title = f"<b>{html.escape(host.name)}</b>"
     # Если узел назван по адресу, не дублируем одно и то же.
     if host.target.strip() != host.name.strip():
         title += f" (<code>{html.escape(host.target)}</code>)"
-    line = f"{STATUS_EMOJI[host.ok]} {title}"
+    line = f"{_host_emoji(host)} {title}"
     extras: list[str] = []
     if host.ok is None:
         extras.append("ещё не проверялся")
     elif host.ok:
         if host.latency is not None:
             extras.append(f"{host.latency:.0f} мс")
+        if host.consecutive_failures:
+            # Пока не сработал flap_threshold, узел ещё считается доступным,
+            # но об этом уже стоит знать.
+            extras.append(
+                f"нет ответа {host.consecutive_failures} из {max(1, flap_threshold)}"
+            )
     else:
         if host.changed_at:
             extras.append(f"недоступен {_human_duration(time.time() - host.changed_at)}")
         if host.detail:
             extras.append(html.escape(host.detail[:120]))
+    # Данные устарели — значит, проверки почему-то не идут.
+    interval = host.interval or default_interval
+    if host.checked_at and time.time() - host.checked_at > max(180, interval * 3):
+        extras.append(f"⚠️ проверок нет {_human_duration(time.time() - host.checked_at)}")
     if not host.enabled:
         extras.append("проверки отключены")
     if extras:
@@ -196,21 +214,45 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     known = [host for host in hosts if host.ok is not None]
     blocks = [
         f"Узлов: {len(hosts)}, доступно {len(known) - down} из {len(known)}, проблемных {down}"
+        f"\n{_freshness_line(hosts, config.monitor.default_interval)}"
         f"\nУведомления: {clock.describe()}"
     ]
     for title, items in _group_by_network(sorted(hosts, key=_status_sort_key), config.networks):
-        lines = "\n".join(_fmt_host(host) for host in items)
+        lines = "\n".join(
+            _fmt_host(host, config.monitor.default_interval, config.monitor.flap_threshold)
+            for host in items
+        )
         blocks.append(f"<b>Сеть: {html.escape(title)}</b> ({len(items)})\n{lines}")
     await update.message.reply_text("\n\n".join(blocks))
 
 
+def _freshness_line(hosts: list[Host], default_interval: int) -> str:
+    """Строка о том, когда узлы проверяли в последний раз."""
+    moments = [host.checked_at for host in hosts if host.checked_at]
+    if not moments:
+        return "⚠️ Проверок ещё не было"
+    ago = max(0.0, time.time() - max(moments))
+    if ago > max(180, default_interval * 3):
+        return (
+            f"⚠️ Проверки не выполняются: последняя {_human_duration(ago)} назад. "
+            "Бот запущен?"
+        )
+    return f"Проверки идут, последняя {_human_duration(ago)} назад"
+
+
 async def cmd_down(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    config: Config = context.application.bot_data["config"]
     storage: Storage = context.application.bot_data["storage"]
     hosts = [host for host in storage.list_hosts() if host.ok is False]
     if not hosts:
         await update.message.reply_text("🔴 Недоступных узлов нет.")
         return
-    await update.message.reply_text("\n".join(_fmt_host(host) for host in hosts))
+    await update.message.reply_text(
+        "\n".join(
+            _fmt_host(host, config.monitor.default_interval, config.monitor.flap_threshold)
+            for host in hosts
+        )
+    )
 
 
 async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -476,6 +518,19 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 # ------------------------------------------------------------------ сборка
 
 
+async def _supervise_monitor(monitor: Monitor) -> None:
+    """Держать цикл мониторинга живым: если он упадёт, перезапустить."""
+    while True:
+        try:
+            await monitor.run()
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - мониторинг важнее падения задачи
+            log.exception("Монитор остановился из-за ошибки, перезапуск через 5 с")
+            await asyncio.sleep(5)
+
+
 async def _post_init(app: Application) -> None:
     config: Config = app.bot_data["config"]
     storage: Storage = app.bot_data["storage"]
@@ -486,9 +541,17 @@ async def _post_init(app: Application) -> None:
     app.bot_data["clock"] = clock
     app.bot_data["notifier"] = notifier
     app.bot_data["monitor"] = monitor
-    app.bot_data["monitor_task"] = asyncio.create_task(monitor.run(), name="netmon-monitor")
+    app.bot_data["monitor_task"] = asyncio.create_task(
+        _supervise_monitor(monitor), name="netmon-monitor"
+    )
 
     log.info("Окно уведомлений: %s", clock.describe())
+    log.info(
+        "Узлов под наблюдением: %s (интервал %s с, порог %s)",
+        len(storage.list_hosts(enabled_only=True)),
+        config.monitor.default_interval,
+        config.monitor.flap_threshold,
+    )
     try:
         await app.bot.set_my_commands(COMMANDS)
     except TelegramError as exc:
@@ -572,5 +635,11 @@ def run(config: Config) -> None:
     if added:
         log.info("Из конфигурации добавлено узлов: %s", added)
     app = create_app(config, storage)
-    log.info("Бот запущен, ожидаю команды")
-    app.run_polling(allowed_updates=Update.ALL_TYPES, close_loop=False)
+    log.info(
+        "Бот запущен (pid %s), база: %s", os.getpid(), storage.path
+    )
+    try:
+        app.run_polling(allowed_updates=Update.ALL_TYPES, close_loop=False)
+    finally:
+        storage.close()
+        log.info("Бот остановлен")
