@@ -65,6 +65,8 @@ class Config:
     networks: list[NetworkConfig] = field(default_factory=list)
     database: str = DEFAULT_DATABASE
     seed_hosts: list[dict[str, Any]] = field(default_factory=list)
+    #: Файл, из которого прочитаны настройки (для /settings и журнала).
+    source: str = ""
 
 
 def load_dotenv(path: str | Path = ".env") -> None:
@@ -176,4 +178,5 @@ def load_config(path: str | Path | None = None) -> Config:
         networks=_parse_networks(raw.get("networks")),
         database=str(raw.get("database") or DEFAULT_DATABASE),
         seed_hosts=seed_hosts,
+        source=str(config_path.resolve()),
     )

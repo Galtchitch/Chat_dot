@@ -474,6 +474,31 @@ class HostFormatTest(unittest.TestCase):
 # ------------------------------------------------------------------- журнал
 
 
+class SettingsTest(unittest.TestCase):
+    """/settings показывает то, что реально загружено в бота."""
+
+    def _text(self, tune) -> str:
+        from netmon.bot import _settings_text
+
+        config = Config(
+            monitor=MonitorConfig(down_repeat_minutes=tune),
+            networks=[NetworkConfig("Сеть 124", "192.168.124.0/24")],
+            source=r"D:\localmonitor\config.yaml",
+        )
+        return _settings_text(config, Clock("07:00-22:30"), make_storage(self))
+
+    def test_shows_file_and_repeat(self) -> None:
+        text = self._text(90)
+        self.assertIn("90 мин", text)
+        self.assertIn(r"D:\localmonitor\config.yaml", text)
+        self.assertIn("после перезапуска", text)
+        self.assertIn("07:00–22:30", text)
+        self.assertIn("Сеть 124", text)
+
+    def test_zero_means_no_reminders(self) -> None:
+        self.assertIn("не напоминать", self._text(0))
+
+
 class LoggingTest(unittest.TestCase):
     def test_log_file_next_to_database(self) -> None:
         from netmon.__main__ import _log_file
@@ -601,6 +626,21 @@ class ConfigTest(unittest.TestCase):
         self.assertTrue(defaults.scan.resolve_names)
         self.assertEqual(defaults.scan.name_timeout, 2.0)
 
+    def test_source_is_absolute_path(self) -> None:
+        from netmon.config import load_config
+
+        config = load_config(self._write("telegram:\n  token: \"\"\n"))
+        self.assertTrue(Path(config.source).is_absolute())
+        self.assertEqual(Path(config.source).name, "config.yaml")
+
+    def test_down_repeat_minutes(self) -> None:
+        from netmon.config import load_config
+
+        config = load_config(self._write("monitor:\n  down_repeat_minutes: 90\n"))
+        self.assertEqual(config.monitor.down_repeat_minutes, 90)
+        default = load_config(self._write("telegram:\n  token: \"\"\n"))
+        self.assertEqual(default.monitor.down_repeat_minutes, 30)
+
 
 class CertsTest(unittest.TestCase):
     def test_der_to_pem(self) -> None:
@@ -636,7 +676,7 @@ class AppBuildTest(unittest.TestCase):
         config = Config()
         config.telegram.token = "123456:TESTTOKEN"
         app = create_app(config, make_storage(self))
-        self.assertEqual(len(app.handlers[0]), 14)
+        self.assertEqual(len(app.handlers[0]), 15)
 
     def test_help_mentions_existing_commands(self) -> None:
         import re

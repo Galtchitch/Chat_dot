@@ -214,8 +214,18 @@ def main(argv: list[str] | None = None) -> int:
 
     log_path = _log_file(config)
     setup_logging(args.log_level, log_path)
+    logger = logging.getLogger("netmon")
     if log_path:
-        logging.getLogger("netmon").info("Журнал: %s", log_path)
+        logger.info("Журнал: %s", log_path)
+    logger.info("Конфигурация: %s", config.source or "config.yaml")
+    logger.info(
+        "Проверка: каждые %s с, тревога после %s неудач, повтор о недоступных: %s",
+        config.monitor.default_interval,
+        config.monitor.flap_threshold,
+        f"{config.monitor.down_repeat_minutes} мин"
+        if config.monitor.down_repeat_minutes
+        else "не напоминать",
+    )
 
     if args.command == "check":
         return asyncio.run(_run_check(config, args.targets, args.timeout))

@@ -44,6 +44,7 @@ COMMANDS = [
     BotCommand("mute", "Отключить оповещения"),
     BotCommand("unmute", "Включить оповещения"),
     BotCommand("id", "Показать ID чата и пользователя"),
+    BotCommand("settings", "Действующие настройки и файл конфигурации"),
     BotCommand("help", "Справка"),
 ]
 
@@ -59,7 +60,8 @@ HELP_TEXT = (
     "/remove имя — удалить узел\n"
     "/disable имя, /enable имя — пауза и возобновление проверок\n"
     "/mute, /unmute — отключить и включить оповещения\n"
-    "/id — ID чата и пользователя\n\n"
+    "/id — ID чата и пользователя\n"
+    "/settings — какие настройки загружены и из какого файла\n\n"
     "Примеры:\n"
     "<code>/add router 192.168.124.1</code>\n"
     "<code>/add nas 192.168.147.10 tcp 445</code>\n"
@@ -195,6 +197,38 @@ async def cmd_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"Чат: <code>{update.effective_chat.id}</code>\n"
         f"Пользователь: <code>{user.id if user else '—'}</code>"
     )
+
+
+def _settings_text(config: Config, clock: Clock, storage: Storage) -> str:
+    """Что реально загружено в бота — чтобы не гадать, какой файл править."""
+    monitor = config.monitor
+    repeat = (
+        f"каждые {monitor.down_repeat_minutes} мин"
+        if monitor.down_repeat_minutes
+        else "не напоминать"
+    )
+    networks = (
+        ", ".join(f"{item.name} ({item.cidr})" for item in config.networks) or "не заданы"
+    )
+    return (
+        "<b>Настройки, с которыми бот запущен</b>\n"
+        f"Файл: <code>{html.escape(config.source or 'config.yaml')}</code>\n"
+        "Изменения в файле подхватываются только после перезапуска.\n\n"
+        f"Проверка узлов: каждые {monitor.default_interval} с (таймаут {monitor.timeout:g} с)\n"
+        f"Тревога после {monitor.flap_threshold} неудач подряд\n"
+        f"Повтор о недоступных: {repeat}\n"
+        f"Уведомления: {clock.describe()}\n"
+        f"Сети: {html.escape(networks)}\n"
+        f"Узлов в базе: {len(storage.list_hosts())}\n"
+        f"База: <code>{html.escape(str(storage.path.resolve()))}</code>"
+    )
+
+
+async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    config: Config = context.application.bot_data["config"]
+    storage: Storage = context.application.bot_data["storage"]
+    clock: Clock = context.application.bot_data["clock"]
+    await update.message.reply_text(_settings_text(config, clock, storage))
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -614,6 +648,7 @@ def create_app(config: Config, storage: Storage) -> Application:
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("id", cmd_id))
+    app.add_handler(CommandHandler("settings", cmd_settings))
     app.add_handler(CommandHandler(["status", "list", "hosts"], cmd_status))
     app.add_handler(CommandHandler("down", cmd_down))
     app.add_handler(CommandHandler(["check", "test"], cmd_check))
